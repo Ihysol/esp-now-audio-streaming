@@ -1,0 +1,23 @@
+# PlatformIO Build and Library Directories
+.pio/
+.piolibdeps/
+.pioenvs/
+
+# Build directory (if you use custom build paths)
+/build/
+
+# IDE and Editor-specific files
+.vscode/
+.vscode-extensions.json
+.vscode-workspace
+
+# Temporary files and logs
+*.log
+*.tmp
+*.bin
+*.hex
+*.elf
+
+# Other common ignored files
+.DS_Store
+Thumbs.db
