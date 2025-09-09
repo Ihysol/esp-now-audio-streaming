@@ -9,7 +9,7 @@ void setup()
   delay(4000);
   Serial.begin(115200);
 
-  audioSendQueue = xQueueCreate(QUEUE_LENGTH, sizeof(AudioMsg_t));
+  audioSendQueue = xQueueCreate(QUEUE_LENGTH, sizeof(AudioQueueItem_t));
   micParams->queue = audioSendQueue;
   memcpy(micParams->senderMac, myMac, 6);
 
@@ -36,7 +36,7 @@ void setup()
     Serial.println("== RECEIVER ==");
 
     // play received audio from esp-now neighbors
-    xTaskCreate(speakerTask, "speaker task", 20000, (void *)audioQueue, 3, NULL);
+    xTaskCreate(speakerTask, "speaker task", 20000, NULL, 3, NULL);
   }
 }
 

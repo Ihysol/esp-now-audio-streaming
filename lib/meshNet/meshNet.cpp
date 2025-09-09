@@ -1,5 +1,7 @@
 #include <meshNet.h>
 
+SemaphoreHandle_t audioMutex = nullptr;
+
 Neighbor_t neighbors[MAX_NEIGHBORS];
 int neighborCount = 0;
 MsgHistory_t history[MAX_HISTORY];
@@ -11,6 +13,23 @@ uint8_t last_msg_id = 0;
 uint8_t broadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 int bufReady[QUEUE_LENGTH] = {0};
+
+static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; ++i)
+    {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++)
+        {
+            if (crc & 0x8000)
+                crc = (crc << 1) ^ 0x1021;
+            else
+                crc <<= 1;
+        }
+    }
+    return crc;
+}
 
 void printMac(const uint8_t mac[6])
 {
@@ -115,71 +134,71 @@ void handleColor(const ColorMsg_t *msg)
 
 void handleAudio(const AudioMsg_t *msg)
 {
-    static int bufOffsets[QUEUE_LENGTH] = {0};
-
-    if (msg->bufIndex >= QUEUE_LENGTH)
+    uint8_t bufIndex = msg->bufIndex;
+    if (bufIndex >= QUEUE_LENGTH || msg->sampleCount == 0 || msg->sampleCount > AUDIO_BUFFER_SIZE)
     {
-        Serial.println("invalid buffer index!");
         return;
     }
 
-    int copyCount = msg->sampleCount;
-
-    if(bufOffsets[msg->bufIndex] + copyCount > SAMPLES_PER_PKT)
+    if (xSemaphoreTake(audioMutex, portMAX_DELAY) == pdTRUE)
     {
-        copyCount = SAMPLES_PER_PKT - bufOffsets[msg->bufIndex];
-    }
-
-    memcpy(psramBuffers[msg->bufIndex] + bufOffsets[msg->bufIndex], msg->samples, copyCount * sizeof(int16_t));
-
-    bufOffsets[msg->bufIndex] += copyCount;
-
-    if(bufOffsets[msg->bufIndex] == SAMPLES_PER_PKT)
-    {
-        bufReady[msg->bufIndex] = SAMPLES_PER_PKT;
-        bufOffsets[msg->bufIndex] = 0;
+        bufReady[bufIndex] = msg->sampleCount;
+        xSemaphoreGive(audioMutex);
     }
 }
 
 void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
 {
+    // must at least contain a header
     if (len < sizeof(MsgHeader_t))
         return; // ignore small packages
 
-    MsgHeader_t header;
-    memcpy(&header, incoming, sizeof(MsgHeader_t));
+    const MsgHeader_t *hdr = (const MsgHeader_t *)incoming;
 
-    if (header.type == MSG_TYPE_COLOR || header.type == MSG_TYPE_AUDIO)
+    // ignore duplicate
+    if (isDuplicate(hdr->senderMac, hdr->msgId))
     {
-        // ignore duplicates
-        if (isDuplicate(header.senderMac, header.msgId))
+        return;
+    }
+    addToHistory(hdr->senderMac, hdr->msgId);
+
+    switch (hdr->type)
+    {
+    case MSG_TYPE_AUDIO:
+    { // brace needed because of *msg declaration inside CASE
+        // ensure packet contains header + sampleCount field
+        if (len < sizeof(AudioMsg_t))
         {
+            Serial.println("[RX] Dropped: Audio packet too small");
             return;
         }
-        // addToHistory(header.senderMac, header.msgId);
-        // addNeighbor(header.senderMac);
+        const AudioMsg_t *msg = (const AudioMsg_t *)incoming;
+        handleAudio(msg);
+        break;
     }
 
-    switch (header.type)
-    {
     case MSG_TYPE_COLOR:
-        if (len == sizeof(ColorMsg_t))
+        if (len < sizeof(ColorMsg_t))
         {
-            handleColor((ColorMsg_t *)incoming);
+            Serial.println("[RX] Dropped: color packet too small");
+            return;
         }
+        handleColor((const ColorMsg_t *)incoming);
         break;
-    case MSG_TYPE_AUDIO:
-        if (len == sizeof(AudioMsg_t))
-        {
-            handleAudio((AudioMsg_t *)incoming);
-        }
-        break;
+
     case MSG_TYPE_HELLO:
-        addNeighbor(header.senderMac);
+        if (len < sizeof(HelloMsg_t))
+        {
+            Serial.println("[RX] Dropped: hello packet too small");
+            return;
+        }
+        addNeighbor(((const HelloMsg_t *)incoming)->header.senderMac);
         break;
+
     default:
+        Serial.printf("[RX] Unknown msg type %u, len=%d\n", (unsigned)hdr->type, len);
         break;
-    }
+    } // END SWITCH
 }
 
 void sendHelloTask(void *params)
@@ -245,44 +264,46 @@ void printNeighborTask(void *params)
 
 void sendAudioTask(void *params)
 {
-    uint8_t msgCounter = 0;
     QueueHandle_t queue = (QueueHandle_t)params;
+    static uint8_t msgCounter = 0;
 
     Serial.println("send audio task enabled");
     for (;;)
     {
-        AudioMsg_t incoming;
-        if (xQueueReceive(queue, &incoming, portMAX_DELAY) == pdTRUE)
+        AudioQueueItem_t item;
+        if (xQueueReceive(queue, &item, portMAX_DELAY) == pdTRUE)
         {
-            int remaining = incoming.sampleCount;
-            int offset = 0;
+            int bufIndex = item.bufIndex;
+            int16_t *buffer = psramBuffers[bufIndex];
+            if (!buffer)
+                continue;
 
-            while (remaining > 0)
+            int samplesRemaining = item.sampleCount;
+            int sampleOffset = 0;
+
+            while (samplesRemaining > 0)
             {
-                int chunkSize = min(AUDIO_CHUNK, remaining);
-
+                int chunkSamples = min(static_cast<unsigned int>(samplesRemaining), ESP_NOW_CHUNK_SIZE / sizeof(int16_t));
                 AudioMsg_t msg;
                 msg.header.type = MSG_TYPE_AUDIO;
                 msg.header.msgId = msgCounter++;
                 memcpy(msg.header.senderMac, myMac, 6);
-                msg.bufIndex = incoming.bufIndex;
-                msg.sampleCount = chunkSize;
+                msg.bufIndex = bufIndex;
+                msg.sampleCount = chunkSamples;
+                msg.chunkOffset = sampleOffset;
 
-                // copy only valid range
-                memcpy(msg.samples, psramBuffers[incoming.bufIndex] + offset, chunkSize * sizeof(int16_t));
-
-                if(chunkSize < AUDIO_CHUNK)
-                {
-                    memset(msg.samples + chunkSize, 0, (AUDIO_CHUNK - chunkSize) * sizeof(int16_t));
-                }
+                // send header + chunk of samples
+                uint8_t sendBuf[sizeof(AudioMsg_t) + ESP_NOW_CHUNK_SIZE];
+                memcpy(sendBuf, &msg, sizeof(AudioMsg_t));
+                memcpy(sendBuf + sizeof(AudioMsg_t), ((uint8_t *)buffer) + sampleOffset * sizeof(int16_t), chunkSamples * sizeof(int16_t));
 
                 for (int i = 0; i < neighborCount; i++)
                 {
-                    esp_now_send(neighbors[i].mac, (uint8_t *)&msg, sizeof(AudioMsg_t));
+                    esp_err_t res = esp_now_send(neighbors[i].mac, sendBuf, sizeof(AudioMsg_t)+chunkSamples*sizeof(int16_t));
                 }
 
-                offset += chunkSize;
-                remaining -= chunkSize;
+                samplesRemaining -= chunkSamples;
+                sampleOffset += chunkSamples;
             }
         }
     }

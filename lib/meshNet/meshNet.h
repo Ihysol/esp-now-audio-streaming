@@ -17,6 +17,7 @@
 #define MAX_NEIGHBORS 10
 #define MAX_HISTORY 10
 
+
 /*** TYPEDEFS ***/
 typedef enum
 {
@@ -38,15 +39,20 @@ typedef struct ColorMsg
     uint8_t colors[5];
 } ColorMsg_t;
 
-
-#define AUDIO_CHUNK 100
 typedef struct AudioMsg
 {
     MsgHeader_t header;
-    uint16_t bufIndex;              // which PSRAM buffer
     uint16_t sampleCount;           // how many samples in this chunk
-    int16_t samples[AUDIO_CHUNK];
+    uint8_t bufIndex;
+    int8_t chunkOffset;
 } AudioMsg_t;
+
+typedef struct {
+    int bufIndex;
+    uint16_t sampleCount;
+} AudioQueueItem_t;
+
+extern SemaphoreHandle_t audioMutex;
 
 typedef struct HelloMsg
 {
