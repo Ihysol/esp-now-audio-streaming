@@ -1,7 +1,5 @@
 #include <meshNet.h>
 
-SemaphoreHandle_t audioMutex = nullptr;
-
 Neighbor_t neighbors[MAX_NEIGHBORS];
 int neighborCount = 0;
 MsgHistory_t history[MAX_HISTORY];
@@ -132,18 +130,43 @@ void handleColor(const ColorMsg_t *msg)
     }
 }
 
-void handleAudio(const AudioMsg_t *msg)
+void handleAudio(const AudioMsg_t *msg, const uint8_t *samples, size_t len)
 {
-    uint8_t bufIndex = msg->bufIndex;
-    if (bufIndex >= QUEUE_LENGTH || msg->sampleCount == 0 || msg->sampleCount > AUDIO_BUFFER_SIZE)
+    if (!speakerRb.buffer || len == 0)
     {
         return;
     }
 
-    if (xSemaphoreTake(audioMutex, portMAX_DELAY) == pdTRUE)
+    size_t sampleCount = msg->sampleCount;
+
+    if (len != sampleCount * sizeof(int16_t))
     {
-        bufReady[bufIndex] = msg->sampleCount;
-        xSemaphoreGive(audioMutex);
+        return;
+    }
+
+    size_t samplesRemaining = sampleCount;
+    size_t offset = 0;
+
+    while (samplesRemaining > 0)
+    {
+        size_t maxContig = 0;
+        int16_t *writePtr = speakerRb.rbWritePtr(speakerRb, maxContig);
+
+        if (maxContig == 0)
+        {
+            // buffer full, drop oldes samples
+            speakerRb.advanceRead(1);
+            continue;
+        }
+
+        // limit chunk to remaining samples
+        size_t chunkSize = min(samplesRemaining, maxContig);
+        // copy chunk into write pointer
+        memcpy(writePtr, ((int16_t *)samples) + offset, chunkSize * sizeof(int16_t));
+        // advance write pointer
+        speakerRb.advanceWrite(chunkSize);
+        samplesRemaining -= chunkSize;
+        offset += chunkSize;
     }
 }
 
@@ -155,12 +178,12 @@ void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
 
     const MsgHeader_t *hdr = (const MsgHeader_t *)incoming;
 
-    // ignore duplicate
-    if (isDuplicate(hdr->senderMac, hdr->msgId))
-    {
-        return;
-    }
-    addToHistory(hdr->senderMac, hdr->msgId);
+    // // ignore duplicate
+    // if (isDuplicate(hdr->senderMac, hdr->msgId))
+    // {
+    //     return;
+    // }
+    // addToHistory(hdr->senderMac, hdr->msgId);
 
     switch (hdr->type)
     {
@@ -173,7 +196,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
             return;
         }
         const AudioMsg_t *msg = (const AudioMsg_t *)incoming;
-        handleAudio(msg);
+        handleAudio(msg, incoming + sizeof(AudioMsg_t), len - sizeof(AudioMsg_t));
         break;
     }
 
@@ -273,35 +296,45 @@ void sendAudioTask(void *params)
         AudioQueueItem_t item;
         if (xQueueReceive(queue, &item, portMAX_DELAY) == pdTRUE)
         {
-            int bufIndex = item.bufIndex;
-            int16_t *buffer = psramBuffers[bufIndex];
-            if (!buffer)
-                continue;
-
-            int samplesRemaining = item.sampleCount;
-            int sampleOffset = 0;
+            size_t samplesRemaining = item.sampleCount; // e.g., AUDIO_FRAME_SIZE
+            size_t sampleOffset = 0;
 
             while (samplesRemaining > 0)
             {
-                int chunkSamples = min(static_cast<unsigned int>(samplesRemaining), ESP_NOW_CHUNK_SIZE / sizeof(int16_t));
+                size_t maxContig = 0;
+                int16_t *readPtr = micRb.rbReadPtr(micRb, maxContig);
+
+                if (maxContig == 0)
+                {
+                    // ring buffer empty, should not happen if micTask pushes correctly
+                    break;
+                }
+                
+                // limit chunk to remaining samples and max contiguous block
+                size_t chunkSamples = min(samplesRemaining, maxContig);
+                chunkSamples = min(chunkSamples, ESP_NOW_CHUNK_SIZE / sizeof(int16_t));
+
+
                 AudioMsg_t msg;
                 msg.header.type = MSG_TYPE_AUDIO;
                 msg.header.msgId = msgCounter++;
                 memcpy(msg.header.senderMac, myMac, 6);
-                msg.bufIndex = bufIndex;
+                msg.bufIndex = 0; // unused with ringbuffer
                 msg.sampleCount = chunkSamples;
                 msg.chunkOffset = sampleOffset;
 
                 // send header + chunk of samples
                 uint8_t sendBuf[sizeof(AudioMsg_t) + ESP_NOW_CHUNK_SIZE];
                 memcpy(sendBuf, &msg, sizeof(AudioMsg_t));
-                memcpy(sendBuf + sizeof(AudioMsg_t), ((uint8_t *)buffer) + sampleOffset * sizeof(int16_t), chunkSamples * sizeof(int16_t));
+                memcpy(sendBuf + sizeof(AudioMsg_t), readPtr, chunkSamples * sizeof(int16_t));
 
                 for (int i = 0; i < neighborCount; i++)
                 {
-                    esp_err_t res = esp_now_send(neighbors[i].mac, sendBuf, sizeof(AudioMsg_t)+chunkSamples*sizeof(int16_t));
+                    esp_err_t res = esp_now_send(neighbors[i].mac, sendBuf, sizeof(AudioMsg_t) + chunkSamples * sizeof(int16_t));
                 }
 
+                //advance read pointer
+                micRb.advanceRead(chunkSamples);
                 samplesRemaining -= chunkSamples;
                 sampleOffset += chunkSamples;
             }

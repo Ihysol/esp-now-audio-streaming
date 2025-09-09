@@ -1,11 +1,14 @@
 #include <customAudio.h>
 
-int16_t *psramBuffers[QUEUE_LENGTH];
-
 int16_t echoBuffer[ECHO_DELAY] = {0};
 int echoIndex = 0;
 
 extern int bufReady[QUEUE_LENGTH];
+
+SemaphoreHandle_t audioMutex;
+
+RingBuffer speakerRb;
+RingBuffer micRb;
 
 i2s_config_t i2s_config =
     {
@@ -53,107 +56,100 @@ void micTask(void *params)
 {
     MicTaskParams_t *ctx = (MicTaskParams_t *)params;
     QueueHandle_t queue = ctx->queue;
-    uint8_t *senderMac = ctx->senderMac;
-    int bufIndex = 0;
 
     Serial.println("mic task enabled");
     for (;;)
     {
-        size_t bytes_read;
-        int16_t *buffer = psramBuffers[bufIndex];
-        if (!buffer)
+        size_t freeSpace = rbGetFreeSpace(micRb);
+        if (freeSpace < AUDIO_FRAME_SIZE)
         {
-            Serial.printf("[mic] ERROR: psramBuffers[%d] is NULL\n", bufIndex);
-            vTaskDelay(1);
-            bufIndex = (bufIndex + 1) % QUEUE_LENGTH;
+            Serial.println("[mic] not enough space on micRb!");
+            vTaskDelay(1); // not enough free space
             continue;
         }
 
-        esp_err_t res = i2s_read(I2S_NUM_0, buffer, AUDIO_BUFFER_SIZE * sizeof(int16_t), &bytes_read, portMAX_DELAY);
-        if (res != ESP_OK || bytes_read != AUDIO_BUFFER_SIZE * sizeof(int16_t))
-        {
-            Serial.printf("[mic] I2S read failed or incomplete: res(%d) bytes_read(%d)\n", res, bytes_read);
-            bufIndex = (bufIndex + 1) % QUEUE_LENGTH;
-            continue;
-        }
+        size_t samplesRemaining = AUDIO_FRAME_SIZE;
 
-        // sanity check
-        if (bytes_read != AUDIO_BUFFER_SIZE * sizeof(int16_t))
+        while (samplesRemaining > 0)
         {
-            Serial.printf("[mic] Incomplete read: %d bytes\n", bytes_read);
-            bufIndex = (bufIndex + 1) % QUEUE_LENGTH;
-            continue;
-        }
+            size_t chunkSize = 0;
+            int16_t *writePtr = micRb.rbWritePtr(micRb, chunkSize);
+            // limit chunk to remaining samples
+            chunkSize = min(chunkSize, samplesRemaining);
 
-        // Queue metadata for sending
-        AudioQueueItem_t item = {
-            .bufIndex = bufIndex,
-            .sampleCount = AUDIO_BUFFER_SIZE
-        };
-
-        // debug
-        Serial.print("[mic] samples: ");
-        for (uint8_t i = 0; i < 8; i++)
-        {
-            Serial.print(buffer[i]);
-            Serial.print(" ");
+            size_t bytesRead = 0;
+            esp_err_t res = i2s_read(I2S_NUM_0, writePtr, chunkSize * sizeof(int16_t), &bytesRead, portMAX_DELAY);
+            if (res != ESP_OK || bytesRead != chunkSize * sizeof(int16_t))
+            {
+                Serial.printf("[mic] I2S read failed: res=%d, bytesRead=%d\n", res, bytesRead);
+                break; // exit this iteration, retry next loop
+            }
+            // debug
+            size_t samplesRead = bytesRead / sizeof(int16_t);
+            Serial.print("[mic] first samples: ");
+            for (size_t i = 0; i < min((size_t)8, samplesRead); i++)
+            {
+                Serial.print(writePtr[i]);
+                Serial.print(" ");
+            }
+            Serial.println();
+            // advance write pointer
+            micRb.advanceWrite(bytesRead / sizeof(int16_t));
+            samplesRemaining -= bytesRead / sizeof(int16_t);
         }
-        Serial.println();
+        // notify sender task that AUDIO_FRAME_SIZE samples are ready
+        AudioQueueItem_t item;
+        item.bufIndex = 0; // not used with ring buffer
+        item.sampleCount = AUDIO_FRAME_SIZE;
 
         if (xQueueSend(queue, &item, 0) != pdTRUE)
         {
-            Serial.println("Audio queue full! Dropping packet...");
+            Serial.println("[mic] Audio queue full! Dropping metadata...");
         }
-
-        // advance buffer index
-        bufIndex = (bufIndex + 1) % QUEUE_LENGTH;
     }
 }
 
 void speakerTask(void *params)
 {
+    const size_t CHUNK_SIZE = 128;
+    int16_t tempBuf[CHUNK_SIZE];
+
+    Serial.println("speaker task enabled");
     for (;;)
     {
-        for (int i = 0; i < QUEUE_LENGTH; i++)
-        {
-            if (xSemaphoreTake(audioMutex, portMAX_DELAY) == pdTRUE)
-            {
-                if (bufReady[i] > 0)
-                {
-                    size_t bytesWritten;
-                    i2s_write(I2S_NUM_1, psramBuffers[i], bufReady[i] * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
-                    bufReady[i] = 0;
-                    
 
-                    Serial.print("[speaker] samples: ");
-                    for (uint8_t j = 0; j < 8; j++)
-                    {
-                        Serial.print(psramBuffers[i][j]);
-                        Serial.print(" ");
-                    }
-                    Serial.println();
-                }
-                xSemaphoreGive(audioMutex);
-            }
+        size_t available = rbAvailable(speakerRb);
+        if (available == 0)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
         }
+
+        size_t toRead = min(available, CHUNK_SIZE);
+
+        // copy samples to tempBuf for continuous i2s write
+        for (size_t i = 0; i < toRead; i++)
+        {
+            tempBuf[i] = speakerRb.buffer[speakerRb.tail];
+            speakerRb.tail = (speakerRb.tail + 1) % speakerRb.size;
+        }
+
+        size_t bytesWritten;
+        i2s_write(I2S_NUM_1, tempBuf, toRead * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
+
+        // Optional debug: print first few samples
+        Serial.print("[speaker] samples: ");
+        for (size_t j = 0; j < min<size_t>(8, toRead); j++)
+        {
+            Serial.print(tempBuf[j]);
+            Serial.print(" ");
+        }
+        Serial.println();
     }
 }
 
 bool initAudio()
 {
-    // create multiple buffers in psram for audio samples
-    for (int i = 0; i < QUEUE_LENGTH; i++)
-    {
-        // each sample is 127 * 2 = 254 bytes
-        psramBuffers[i] = (int16_t *)heap_caps_malloc(AUDIO_BUFFER_SIZE * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        if (!psramBuffers[i])
-        {
-            Serial.println("failed to allocate PSRAM buffers!");
-            return false;
-        }
-        memset(psramBuffers[i], 0, AUDIO_BUFFER_SIZE * sizeof(int16_t));
-    }
-
     audioMutex = xSemaphoreCreateMutex();
     if (!audioMutex)
     {
@@ -190,6 +186,9 @@ bool initAudio()
     }
 
     i2s_zero_dma_buffer(I2S_NUM_1);
+
+    initRingBuffer(micRb, AUDIO_RING_SIZE);
+    initRingBuffer(speakerRb, AUDIO_BUFFER_SIZE);
 
     return true;
 }
