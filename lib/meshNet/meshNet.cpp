@@ -179,11 +179,11 @@ void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
     const MsgHeader_t *hdr = (const MsgHeader_t *)incoming;
 
     // // ignore duplicate
-    // if (isDuplicate(hdr->senderMac, hdr->msgId))
-    // {
-    //     return;
-    // }
-    // addToHistory(hdr->senderMac, hdr->msgId);
+    if (isDuplicate(hdr->senderMac, hdr->msgId))
+    {
+        return;
+    }
+    addToHistory(hdr->senderMac, hdr->msgId);
 
     switch (hdr->type)
     {

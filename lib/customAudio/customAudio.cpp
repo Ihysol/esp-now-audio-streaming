@@ -86,13 +86,13 @@ void micTask(void *params)
             }
             // debug
             size_t samplesRead = bytesRead / sizeof(int16_t);
-            Serial.print("[mic] first samples: ");
-            for (size_t i = 0; i < min((size_t)8, samplesRead); i++)
-            {
-                Serial.print(writePtr[i]);
-                Serial.print(" ");
-            }
-            Serial.println();
+            // Serial.print("[mic] first samples: ");
+            // for (size_t i = 0; i < min((size_t)8, samplesRead); i++)
+            // {
+            //     Serial.print(writePtr[i]);
+            //     Serial.print(" ");
+            // }
+            // Serial.println();
             // advance write pointer
             micRb.advanceWrite(bytesRead / sizeof(int16_t));
             samplesRemaining -= bytesRead / sizeof(int16_t);
@@ -138,13 +138,13 @@ void speakerTask(void *params)
         i2s_write(I2S_NUM_1, tempBuf, toRead * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
 
         // Optional debug: print first few samples
-        Serial.print("[speaker] samples: ");
-        for (size_t j = 0; j < min<size_t>(8, toRead); j++)
-        {
-            Serial.print(tempBuf[j]);
-            Serial.print(" ");
-        }
-        Serial.println();
+        // Serial.print("[speaker] samples: ");
+        // for (size_t j = 0; j < min<size_t>(8, toRead); j++)
+        // {
+        //     Serial.print(tempBuf[j]);
+        //     Serial.print(" ");
+        // }
+        // Serial.println();
     }
 }
 
