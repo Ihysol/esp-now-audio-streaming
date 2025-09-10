@@ -7,6 +7,7 @@
 #include <esp_now.h>
 
 #include <customAudio.h>
+#include <RingBuffer.h>
 
 /*** DEFINES ***/
 #define ROLE_SENDER 1
@@ -82,6 +83,9 @@ extern uint8_t msgCounter;
 
 extern uint8_t broadcastAddress[6];
 
+extern RingBuffer micRb;
+extern RingBuffer speakerRb;
+
 /*** FUNCTION PROTOTYPES ***/
 void printMac(const uint8_t mac[6]);
 bool isDuplicate(const uint8_t sender[6], uint8_t msgId);
@@ -98,6 +102,6 @@ void sendAudioTask(void *params);
 void sendHelloTask(void *params);
 
 void handleColor(const ColorMsg_t *msg);
-void handleAudio(const AudioMsg_t *msg);
+void handleAudio(const AudioMsg_t *msg, const uint8_t *samples, size_t len);
 
 #endif
