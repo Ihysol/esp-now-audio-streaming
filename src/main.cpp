@@ -4,10 +4,33 @@ QueueHandle_t audioSendQueue;
 
 MicTaskParams_t *micParams = (MicTaskParams_t *)malloc(sizeof(MicTaskParams_t));
 
+uint16_t mySenderId;
+uint8_t mySeqCounter;
+
+uint16_t generateSenderID(const uint8_t mac[6])
+{
+  return (mac[0] << 8 | mac[1]) ^ (mac[2] << 8 | mac[3]) ^ (mac[4] << 8 | mac[5]);
+}
+
 void setup()
 {
   delay(4000);
   Serial.begin(115200);
+
+  // create unique senderID
+
+  // set device as Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+  WiFi.macAddress(myMac);
+
+  Serial.print("MAC: ");
+  printMac(myMac);
+  Serial.println();
+
+  mySenderId = generateSenderID(myMac);
+  Serial.print("senderId: ");
+  Serial.println(mySenderId);
+  mySeqCounter = 0;
 
   audioSendQueue = xQueueCreate(QUEUE_LENGTH, sizeof(AudioQueueItem_t));
   micParams->queue = audioSendQueue;

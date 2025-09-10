@@ -30,7 +30,8 @@ typedef enum
 typedef struct
 {
     uint8_t type;
-    uint8_t msgId;
+    uint16_t senderId;
+    uint8_t seq;
     uint8_t senderMac[6];
 } MsgHeader_t;
 
@@ -62,13 +63,14 @@ typedef struct HelloMsg
 
 typedef struct Neighbor
 {
+    uint16_t senderId;
     uint8_t mac[6];
 } Neighbor_t;
 
 typedef struct MsgHistory
 {
     uint8_t senderMac[6];
-    uint8_t msgId;
+    uint16_t senderId;
 } MsgHistory_t;
 
 /*** GLOBAL VARIABLES ***/
@@ -86,11 +88,14 @@ extern uint8_t broadcastAddress[6];
 extern RingBuffer micRb;
 extern RingBuffer speakerRb;
 
+extern uint8_t mySeqCounter;
+extern uint16_t mySenderId;
+
 /*** FUNCTION PROTOTYPES ***/
 void printMac(const uint8_t mac[6]);
-bool isDuplicate(const uint8_t sender[6], uint8_t msgId);
-void addToHistory(const uint8_t sender[6], uint8_t msgId);
-bool addNeighbor(const uint8_t mac[6]);
+bool isDuplicate(uint16_t senderId);
+void addToHistory(uint16_t senderId);
+bool addNeighbor(uint16_t senderID, const uint8_t mac[6]);
 bool addPeer(const uint8_t mac[6]);
 void onReceive(const uint8_t *mac, const uint8_t *incoming, int len);
 

@@ -52,6 +52,9 @@ extern SemaphoreHandle_t audioMutex;
 extern RingBuffer micRb;
 extern RingBuffer speakerRb;
 
+extern uint8_t mySeqCounter;
+extern uint16_t mySenderId;
+
 /*** FUNCTION PROTOTYPES ***/
 bool initAudio();
 void micTask(void *params);

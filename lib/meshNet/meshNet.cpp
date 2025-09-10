@@ -39,22 +39,21 @@ void printMac(const uint8_t mac[6])
     }
 }
 
-bool isDuplicate(const uint8_t sender[6], uint8_t msgId)
+bool isDuplicate(uint16_t senderId)
 {
     for (int i = 0; i < historyCount; i++)
     {
-        if (memcmp(history[i].senderMac, sender, 6) == 0 && history[i].msgId == msgId)
+        if (history[i].senderId == senderId)
             return true;
     }
     return false;
 }
 
-void addToHistory(const uint8_t sender[6], uint8_t msgId)
+void addToHistory(uint16_t senderId)
 {
     if (historyCount < MAX_HISTORY)
     {
-        memcpy(history[historyCount].senderMac, sender, 6);
-        history[historyCount].msgId = msgId;
+        history[historyCount].senderId = senderId;
         historyCount++;
     }
     else
@@ -62,8 +61,7 @@ void addToHistory(const uint8_t sender[6], uint8_t msgId)
         // simple fifo
         for (int i = 1; i < MAX_HISTORY; i++)
             history[i - 1] = history[i];
-        memcpy(history[MAX_HISTORY - 1].senderMac, sender, 6);
-        history[MAX_HISTORY - 1].msgId = msgId;
+        history[MAX_HISTORY - 1].senderId = senderId;
     }
 }
 
@@ -91,18 +89,22 @@ bool addPeer(const uint8_t mac[6])
     return true;
 }
 
-bool addNeighbor(const uint8_t mac[6])
+bool addNeighbor(uint16_t senderID, const uint8_t mac[6])
 {
     for (int i = 0; i < neighborCount; i++)
-        if (memcmp(neighbors[i].mac, mac, 6) == 0)
-            return false;
+        if (neighbors[i].senderId == senderID)
+        {
+            return false; // already known
+        }
 
     if (neighborCount < MAX_NEIGHBORS)
     {
+        neighbors[neighborCount].senderId = senderID;
         memcpy(neighbors[neighborCount].mac, mac, 6);
         neighborCount++;
         Serial.println("new neighbor");
         addPeer(mac);
+        Serial.printf("senderID: %d", senderID);
         return true;
     }
     return false;
@@ -120,14 +122,15 @@ void handleColor(const ColorMsg_t *msg)
     }
     Serial.println();
 
-    // forward to neighbors
-    for (int i = 0; i < neighborCount; i++)
-    {
-        if (memcmp(neighbors[i].mac, msg->header.senderMac, 6) != 0)
-        {
-            esp_now_send(neighbors[i].mac, (uint8_t *)msg, sizeof(ColorMsg_t));
-        }
-    }
+    esp_now_send(broadcastAddress, (uint8_t *)msg, sizeof(ColorMsg_t));
+    // // forward to neighbors
+    // for (int i = 0; i < neighborCount; i++)
+    // {
+    //     if (memcmp(neighbors[i].mac, msg->header.senderMac, 6) != 0)
+    //     {
+    //         esp_now_send(neighbors[i].mac, (uint8_t *)msg, sizeof(ColorMsg_t));
+    //     }
+    // }
 }
 
 void handleAudio(const AudioMsg_t *msg, const uint8_t *samples, size_t len)
@@ -178,12 +181,18 @@ void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
 
     const MsgHeader_t *hdr = (const MsgHeader_t *)incoming;
 
-    // // ignore duplicate
-    if (isDuplicate(hdr->senderMac, hdr->msgId))
+    // ignore own packets
+    if (memcmp(hdr->senderMac, myMac, 6) == 0)
     {
         return;
     }
-    addToHistory(hdr->senderMac, hdr->msgId);
+
+    // // ignore duplicate
+    if (isDuplicate(hdr->senderId))
+    {
+        return;
+    }
+    addToHistory(hdr->senderId);
 
     switch (hdr->type)
     {
@@ -210,13 +219,17 @@ void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
         break;
 
     case MSG_TYPE_HELLO:
+    {
         if (len < sizeof(HelloMsg_t))
         {
             Serial.println("[RX] Dropped: hello packet too small");
             return;
         }
-        addNeighbor(((const HelloMsg_t *)incoming)->header.senderMac);
+        const HelloMsg_t *HelloMsg = (const HelloMsg_t *)incoming;
+        uint16_t senderID = HelloMsg->header.senderId;
+        addNeighbor(senderID, mac);
         break;
+    }
 
     default:
         Serial.printf("[RX] Unknown msg type %u, len=%d\n", (unsigned)hdr->type, len);
@@ -228,6 +241,8 @@ void sendHelloTask(void *params)
 {
     HelloMsg_t msg;
     msg.header.type = MSG_TYPE_HELLO;
+    msg.header.senderId = mySenderId;
+    msg.header.seq = mySeqCounter++;
     memcpy(msg.header.senderMac, myMac, 6);
 
     for (;;)
@@ -239,14 +254,13 @@ void sendHelloTask(void *params)
 
 void sendColorTask(void *params)
 {
-    uint8_t msgCounter = 0;
-
     Serial.println("send color task enabled");
     for (;;)
     {
         ColorMsg_t msg;
         msg.header.type = MSG_TYPE_COLOR;
-        msg.header.msgId = msgCounter++;
+        msg.header.senderId = mySenderId;
+        msg.header.seq = mySeqCounter++;
         memcpy(msg.header.senderMac, myMac, 6);
 
         Serial.print("sending new colors: ");
@@ -259,10 +273,11 @@ void sendColorTask(void *params)
         }
         Serial.println();
 
-        for (int i = 0; i < neighborCount; i++)
-        {
-            esp_now_send(neighbors[i].mac, (uint8_t *)&msg, sizeof(msg));
-        }
+        esp_now_send(broadcastAddress, (uint8_t *)&msg, sizeof(ColorMsg_t));
+        // for (int i = 0; i < neighborCount; i++)
+        // {
+        //     esp_now_send(neighbors[i].mac, (uint8_t *)&msg, sizeof(msg));
+        // }
 
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
@@ -288,7 +303,6 @@ void printNeighborTask(void *params)
 void sendAudioTask(void *params)
 {
     QueueHandle_t queue = (QueueHandle_t)params;
-    static uint8_t msgCounter = 0;
 
     Serial.println("send audio task enabled");
     for (;;)
@@ -309,15 +323,15 @@ void sendAudioTask(void *params)
                     // ring buffer empty, should not happen if micTask pushes correctly
                     break;
                 }
-                
+
                 // limit chunk to remaining samples and max contiguous block
                 size_t chunkSamples = min(samplesRemaining, maxContig);
                 chunkSamples = min(chunkSamples, ESP_NOW_CHUNK_SIZE / sizeof(int16_t));
 
-
                 AudioMsg_t msg;
                 msg.header.type = MSG_TYPE_AUDIO;
-                msg.header.msgId = msgCounter++;
+                msg.header.seq = mySeqCounter++;
+                msg.header.senderId = mySenderId;
                 memcpy(msg.header.senderMac, myMac, 6);
                 msg.bufIndex = 0; // unused with ringbuffer
                 msg.sampleCount = chunkSamples;
@@ -328,12 +342,14 @@ void sendAudioTask(void *params)
                 memcpy(sendBuf, &msg, sizeof(AudioMsg_t));
                 memcpy(sendBuf + sizeof(AudioMsg_t), readPtr, chunkSamples * sizeof(int16_t));
 
-                for (int i = 0; i < neighborCount; i++)
-                {
-                    esp_err_t res = esp_now_send(neighbors[i].mac, sendBuf, sizeof(AudioMsg_t) + chunkSamples * sizeof(int16_t));
-                }
+                esp_now_send(broadcastAddress, sendBuf, sizeof(AudioMsg_t) + chunkSamples * sizeof(int16_t));
 
-                //advance read pointer
+                // for (int i = 0; i < neighborCount; i++)
+                // {
+                //     esp_err_t res = esp_now_send(neighbors[i].mac, sendBuf, sizeof(AudioMsg_t) + chunkSamples * sizeof(int16_t));
+                // }
+
+                // advance read pointer
                 micRb.advanceRead(chunkSamples);
                 samplesRemaining -= chunkSamples;
                 sampleOffset += chunkSamples;
@@ -344,14 +360,6 @@ void sendAudioTask(void *params)
 
 void initMeshNet(void)
 {
-    // set device as Wi-Fi Station
-    WiFi.mode(WIFI_STA);
-    WiFi.macAddress(myMac);
-
-    Serial.print("MAC: ");
-    printMac(myMac);
-    Serial.println();
-
     // init esp now
     if (esp_now_init() != ESP_OK)
     {
