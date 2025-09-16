@@ -9,6 +9,8 @@
 #include <customAudio.h>
 #include <RingBuffer.h>
 
+#include <ledDriver.h>
+
 /*** DEFINES ***/
 #define ROLE_SENDER 1
 #define ROLE_RECEIVER 2
@@ -69,8 +71,8 @@ typedef struct Neighbor
 
 typedef struct MsgHistory
 {
-    uint8_t senderMac[6];
     uint16_t senderId;
+    uint16_t seq;
 } MsgHistory_t;
 
 /*** GLOBAL VARIABLES ***/
@@ -90,6 +92,8 @@ extern RingBuffer speakerRb;
 
 extern uint8_t mySeqCounter;
 extern uint16_t mySenderId;
+
+extern LEDDriver ledDriver;
 
 /*** FUNCTION PROTOTYPES ***/
 void printMac(const uint8_t mac[6]);

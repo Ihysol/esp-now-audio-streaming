@@ -26,8 +26,8 @@
 #define LOW_PASS_ALPHA 0.60f
 #define OUTPUT_GAIN 1.0f
 
-#define AUDIO_BUFFER_SIZE 254  // size of PSRAM buffer (samples per buffer)
-#define ESP_NOW_CHUNK_SIZE 100 // max samples per ESP-NOW packet
+#define AUDIO_BUFFER_SIZE 200  // size of PSRAM buffer (samples per buffer)
+#define ESP_NOW_CHUNK_SIZE 99 // max samples per ESP-NOW packet
 #define QUEUE_LENGTH 10        // number of PSRAM buffers
 
 #define AUDIO_RING_SIZE (AUDIO_BUFFER_SIZE * 4)

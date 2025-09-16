@@ -1,5 +1,15 @@
 #include <main.h>
 
+std::map<LEDDriver::ColorChannel, int> myLEDs =
+{
+  {LEDDriver::ColorChannel::RED, RX},
+  {LEDDriver::ColorChannel::GRN, 1},
+  {LEDDriver::ColorChannel::BLU, 2},
+  {LEDDriver::ColorChannel::WW, 3},
+  {LEDDriver::ColorChannel::CW, 4},
+};
+LEDDriver ledDriver(myLEDs);
+
 QueueHandle_t audioSendQueue;
 
 MicTaskParams_t *micParams = (MicTaskParams_t *)malloc(sizeof(MicTaskParams_t));

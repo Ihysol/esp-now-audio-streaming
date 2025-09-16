@@ -3,7 +3,7 @@
 Neighbor_t neighbors[MAX_NEIGHBORS];
 int neighborCount = 0;
 MsgHistory_t history[MAX_HISTORY];
-int historyCount = 0;
+int historyIndex = 0;
 uint8_t myMac[6];
 
 uint8_t last_msg_id = 0;
@@ -39,30 +39,25 @@ void printMac(const uint8_t mac[6])
     }
 }
 
-bool isDuplicate(uint16_t senderId)
+bool isDuplicate(uint16_t senderId, uint16_t seq)
 {
-    for (int i = 0; i < historyCount; i++)
+
+    for (int i = 0; i < MAX_HISTORY; i++)
     {
-        if (history[i].senderId == senderId)
+        if (history[i].senderId == senderId && history[i].seq == seq)
+        {
             return true;
+        }
     }
     return false;
 }
 
-void addToHistory(uint16_t senderId)
+void addToHistory(uint16_t senderId, uint16_t seq)
 {
-    if (historyCount < MAX_HISTORY)
-    {
-        history[historyCount].senderId = senderId;
-        historyCount++;
-    }
-    else
-    {
-        // simple fifo
-        for (int i = 1; i < MAX_HISTORY; i++)
-            history[i - 1] = history[i];
-        history[MAX_HISTORY - 1].senderId = senderId;
-    }
+
+    history[historyIndex].senderId = senderId;
+    history[historyIndex].seq = seq;
+    historyIndex = (historyIndex + 1) % MAX_HISTORY;
 }
 
 bool addPeer(const uint8_t mac[6])
@@ -122,6 +117,14 @@ void handleColor(const ColorMsg_t *msg)
     }
     Serial.println();
 
+    ledDriver.setColor(msg->colors);
+
+    Serial.println(ledDriver.getColor(LEDDriver::ColorChannel::RED));
+    Serial.println(ledDriver.getColor(LEDDriver::ColorChannel::GRN));
+    Serial.println(ledDriver.getColor(LEDDriver::ColorChannel::BLU));
+    Serial.println(ledDriver.getColor(LEDDriver::ColorChannel::WW));
+    Serial.println(ledDriver.getColor(LEDDriver::ColorChannel::CW));
+
     esp_now_send(broadcastAddress, (uint8_t *)msg, sizeof(ColorMsg_t));
     // // forward to neighbors
     // for (int i = 0; i < neighborCount; i++)
@@ -135,21 +138,22 @@ void handleColor(const ColorMsg_t *msg)
 
 void handleAudio(const AudioMsg_t *msg, const uint8_t *samples, size_t len)
 {
+    // buffer not available
     if (!speakerRb.buffer || len == 0)
     {
         return;
     }
 
+    // check if awaited sample size is correct
     size_t sampleCount = msg->sampleCount;
-
     if (len != sampleCount * sizeof(int16_t))
     {
         return;
     }
 
+    // wait and pack full messages from incoming samples to put in ringbuffer
     size_t samplesRemaining = sampleCount;
     size_t offset = 0;
-
     while (samplesRemaining > 0)
     {
         size_t maxContig = 0;
@@ -181,18 +185,17 @@ void onReceive(const uint8_t *mac, const uint8_t *incoming, int len)
 
     const MsgHeader_t *hdr = (const MsgHeader_t *)incoming;
 
-    // ignore own packets
-    if (memcmp(hdr->senderMac, myMac, 6) == 0)
+    // ignore own packets, even if two esp's happen to have same mac
+    if (hdr->senderId == mySenderId && memcmp(mac, myMac, 6) == 0)
     {
         return;
     }
 
-    // // ignore duplicate
-    if (isDuplicate(hdr->senderId))
+    if (isDuplicate(hdr->senderId, hdr->seq))
     {
         return;
     }
-    addToHistory(hdr->senderId);
+    addToHistory(hdr->senderId, hdr->seq);
 
     switch (hdr->type)
     {
@@ -254,6 +257,7 @@ void sendHelloTask(void *params)
 
 void sendColorTask(void *params)
 {
+    uint32_t dummy = 0;
     Serial.println("send color task enabled");
     for (;;)
     {
@@ -265,9 +269,11 @@ void sendColorTask(void *params)
 
         Serial.print("sending new colors: ");
 
+        dummy += 64 % 256;
         for (int i = 0; i < 5; i++)
         {
-            msg.colors[i] = random(0, 255);
+            // msg.colors[i] = random(0, 255);
+            msg.colors[i] = dummy;
             Serial.print(msg.colors[i]);
             Serial.print(" ");
         }
@@ -344,11 +350,6 @@ void sendAudioTask(void *params)
 
                 esp_now_send(broadcastAddress, sendBuf, sizeof(AudioMsg_t) + chunkSamples * sizeof(int16_t));
 
-                // for (int i = 0; i < neighborCount; i++)
-                // {
-                //     esp_err_t res = esp_now_send(neighbors[i].mac, sendBuf, sizeof(AudioMsg_t) + chunkSamples * sizeof(int16_t));
-                // }
-
                 // advance read pointer
                 micRb.advanceRead(chunkSamples);
                 samplesRemaining -= chunkSamples;
@@ -360,6 +361,13 @@ void sendAudioTask(void *params)
 
 void initMeshNet(void)
 {
+    // set clear history to avoid false positives on startup
+    for (int i = 0; i < MAX_HISTORY; i++)
+    {
+        history[i].senderId = 0xffff; // invalid
+        history[i].seq = 0xffff;      // invalid
+    }
+
     // init esp now
     if (esp_now_init() != ESP_OK)
     {
